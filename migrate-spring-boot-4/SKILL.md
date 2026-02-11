@@ -11,6 +11,17 @@ Execute this migration autonomously. Make all decisions automatically based on t
 
 This skill migrates a Kotlin/Gradle Spring Boot project from version 3.X to 4.X. Spring Boot 4 includes significant changes including Jakarta EE 11, Java 25 support, Jackson 3.0 migration, and various API changes in Spring Security, Kafka, and other modules.
 
+## ⚠️ IMPORTANT PRE-MIGRATION CHECKS
+
+Before starting the migration, verify the following:
+
+1. **Spring Boot 4 Availability**: Confirm that Spring Boot 4.0.2+ is actually released and stable
+2. **Jackson 3.0 Compatibility**: Check Spring Boot 4 release notes for full Jackson 3.0 support status
+3. **Dependency Compatibility**: This migration may require Spring Boot 4.0.3+ for full Jackson 3.0 support
+4. **Backup**: Ensure you have a clean git state and can revert if needed
+
+**Note**: Spring Boot 4 with Jackson 3.0 may still have compatibility issues. Be prepared to troubleshoot compilation errors related to Jackson package structure.
+
 ## Execution Instructions
 
 ### 0. Preparation
@@ -205,6 +216,14 @@ implementation(libs.bundles.spring.boot.starter)
 implementation(libs.okio)
 ```
 
+**Handle spring-boot-starter-aop:**
+```kotlin
+// spring-boot-starter-aop may not be available as a standalone dependency in Spring Boot 4
+// AOP is now pulled transitively from other Spring Boot starters
+// Comment out or remove if present:
+// implementation(libs.spring.boot.starter.aop)
+```
+
 **Replace Flyway standalone with Spring Boot starter:**
 ```kotlin
 // Keep:
@@ -225,12 +244,17 @@ testImplementation(libs.bundles.spring.test)
 
 ### 4. Add Jackson Exclusions (Prevent Old Jackson Versions)
 
-**IMPORTANT:** Add Jackson exclusions to prevent old Jackson 2.x (`com.fasterxml.jackson`) from being pulled in as transitive dependencies. This ensures only Jackson 3.x (`tools.jackson`) is used.
+**⚠️ CRITICAL: Jackson 3.0 has a SPLIT PACKAGE STRUCTURE**
+
+Jackson 3.0 uses a hybrid package structure:
+- **Annotations remain in OLD package**: `com.fasterxml.jackson.annotation.*` (JsonInclude, JsonProperty, etc.)
+- **Core/databind moved to NEW package**: `tools.jackson.*` (JsonMapper, JsonSerializer, etc.)
 
 **Add to build.gradle.kts (after dependencies block):**
 ```kotlin
 configurations.all {
     if (name.contains("compile", ignoreCase = true)) {
+        // ONLY exclude these. DO NOT exclude: com.fasterxml.jackson.annotation (still used in Jackson 3.0)
         exclude(group = "com.fasterxml.jackson.core", module = "jackson-databind")
         exclude(group = "com.fasterxml.jackson.module", module = "jackson-module-kotlin")
         exclude(group = "com.fasterxml.jackson.datatype", module = "jackson-datatype-jsr310")
@@ -238,16 +262,11 @@ configurations.all {
 }
 ```
 
-This configuration:
-- Applies to all compile-time configurations (compileClasspath, runtimeClasspath, etc.)
-- Excludes old Jackson 2.x modules that might be brought in by third-party dependencies
-- Forces all dependencies to use the new Jackson 3.x (`tools.jackson`) provided by Spring Boot 4
-- Prevents classpath conflicts between Jackson 2.x and 3.x
-
-**Why this is necessary:**
-- Some third-party libraries may still depend on Jackson 2.x
-- Having both Jackson 2.x and 3.x on the classpath causes runtime errors
-- This exclusion ensures consistent Jackson 3.x usage across the entire application
+**Why this configuration is critical:**
+- Some third-party libraries may still depend on Jackson 2.x databind
+- Jackson 3.0 STILL USES `com.fasterxml.jackson.annotation.*` for annotations
+- Excluding annotations will cause "Unresolved reference" compilation errors
+- This exclusion prevents only the databind/core conflicts, not annotation conflicts
 
 ### 5. Update GitHub Workflows
 
@@ -265,25 +284,36 @@ java-version: '25'
 
 ### 6. Update Jackson/ObjectMapper Configuration
 
-**Migrate from com.fasterxml.jackson to tools.jackson:**
+**⚠️ CRITICAL: Jackson 3.0 Package Structure**
 
-In `ObjectMapperConfig.kt` or similar configuration files:
+Jackson 3.0 uses a SPLIT package structure. Update imports carefully:
 
+**Annotations stay in OLD package:**
 ```kotlin
-// Old imports:
+import com.fasterxml.jackson.annotation.JsonInclude  // ✓ Keep this
+import com.fasterxml.jackson.annotation.JsonProperty  // ✓ Keep this
+import com.fasterxml.jackson.annotation.JsonSerialize  // ✓ Keep this
+```
+
+**Core/databind move to NEW package:**
+```kotlin
+// Old imports - REPLACE these:
 // import com.fasterxml.jackson.databind.DeserializationFeature
 // import com.fasterxml.jackson.databind.ObjectMapper
 // import com.fasterxml.jackson.databind.SerializationFeature
-// import com.fasterxml.jackson.databind.module.SimpleModule
 // import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
-// import com.fasterxml.jackson.module.kotlin.KotlinModule
 
-// New imports:
+// New imports - USE these:
 import tools.jackson.core.StreamReadFeature
+import tools.jackson.core.JsonGenerator
+import tools.jackson.core.JsonParser
 import tools.jackson.databind.DeserializationFeature
+import tools.jackson.databind.DeserializationContext
+import tools.jackson.databind.SerializerProvider
+import tools.jackson.databind.JsonSerializer
 import tools.jackson.databind.cfg.DateTimeFeature
 import tools.jackson.databind.json.JsonMapper
-import tools.jackson.databind.module.SimpleModule
+import tools.jackson.databind.deser.std.StdDeserializer
 import tools.jackson.module.kotlin.KotlinModule
 ```
 
@@ -336,6 +366,24 @@ Key changes:
 - Use builder pattern with `.addModules()` instead of `.registerModule()`
 - Add `kotlinModule` last in the module chain
 
+**⚠️ CRITICAL: serializationInclusion API Changed**
+
+The `.serializationInclusion()` method signature changed in Jackson 3.0:
+
+```kotlin
+// OLD (Jackson 2.x / Spring Boot 3):
+ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL)
+
+// NEW (Jackson 3.0 / Spring Boot 4):
+JsonMapper.builder()
+    .serializationInclusion(
+        JsonInclude.Value.construct(JsonInclude.Include.NON_NULL, JsonInclude.Include.NON_NULL)
+    )
+    .build()
+```
+
+Note: The method now requires `JsonInclude.Value.construct()` instead of just `JsonInclude.Include`.
+
 ### 7. Update Kafka Configuration
 
 **Update package imports:**
@@ -377,26 +425,47 @@ class KafkaConfiguration(
 val configProps = properties.buildProducerProperties()
 ```
 
-**Update factory customizers to use property access syntax:**
-```kotlin
-// Old:
-// consumerFactory.setValueDeserializer(glueSchemaRegistryKafkaDeserializer())
-// producerFactory.setValueSerializer(glueSchemaRegistryKafkaSerializer())
+**⚠️ IMPORTANT: Kafka Property Assignment May Not Work**
 
-// New:
-consumerFactory.valueDeserializer = glueSchemaRegistryKafkaDeserializer()
-producerFactory.valueSerializer = glueSchemaRegistryKafkaSerializer()
+Kotlin property assignment syntax may fail in Spring Boot 4. Use setter methods instead:
+
+```kotlin
+// OLD (Spring Boot 3) - May fail in Spring Boot 4:
+val factory = ConcurrentKafkaListenerContainerFactory<String, String>()
+factory.consumerFactory = consumerFactory  // ❌ May cause "val cannot be reassigned" error
+
+// NEW (Spring Boot 4) - Use setter methods:
+val factory = ConcurrentKafkaListenerContainerFactory<String, String>()
+factory.setConsumerFactory(consumerFactory)  // ✅ Use explicit setter
+factory.setCommonErrorHandler(errorHandler)
 ```
 
-**Add suppression for deprecated setter methods if needed:**
+**Update ExponentialBackOff.maxAttempts type:**
+
+The `maxAttempts` property changed from `Int` to `Long`:
+
 ```kotlin
-.apply {
-    @Suppress("UsePropertyAccessSyntax")
-    setLogLevel(KafkaException.Level.DEBUG)
-}
+// OLD:
+maxAttempts = Int.MAX_VALUE  // ❌ Type mismatch
+
+// NEW:
+maxAttempts = Long.MAX_VALUE  // ✅ Correct type
+maxAttempts = retryMaxAttempts.toLong()  // ✅ Convert Int to Long
 ```
 
 ### 8. Update Spring Security Configuration
+
+**⚠️ IMPORTANT: Spring Security Package Changes**
+
+UserDetailsServiceAutoConfiguration moved to a new package:
+
+```kotlin
+// OLD (Spring Boot 3):
+import org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
+
+// NEW (Spring Boot 4):
+import org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration
+```
 
 **Update AuthorizationManager lambda signatures:**
 
@@ -494,6 +563,24 @@ class CustomerJwtTokenService(private val objectMapper: JsonMapper)
 ```
 
 ### 11. Update REST Client Configuration
+
+**⚠️ KNOWN ISSUE: RestTemplateBuilder Package**
+
+RestTemplateBuilder may have package/module issues in Spring Boot 4:
+
+```kotlin
+// Expected import:
+import org.springframework.boot.web.client.RestTemplateBuilder
+
+// Issue: May cause "Unresolved reference 'client'" compilation error
+// This appears to be a Spring Boot 4.0.2 modular structure issue
+// The package may not be available at compile-time in some builds
+
+// Workaround options:
+// 1. Wait for Spring Boot 4.0.3+ which may fix this
+// 2. Migrate to Spring Boot 4's new RestClient API instead:
+import org.springframework.web.client.RestClient
+```
 
 **Add HTTP URL suppression where applicable:**
 
@@ -698,13 +785,18 @@ This controller:
 Apply these rules without asking:
 
 1. **Use latest stable versions:** Spring Boot 4.0.2 or newer, Java 25
-2. **Migrate all Jackson:** Change all `com.fasterxml.jackson` to `tools.jackson`
+2. **⚠️ CRITICAL: Migrate Jackson carefully:**
+   - Annotations stay in `com.fasterxml.jackson.annotation.*` (OLD package)
+   - Core/databind move to `tools.jackson.*` (NEW package)
+   - Do NOT blindly change all imports!
 3. **Consolidate dependencies:** Use Spring Boot starters instead of standalone libraries
 4. **Update all test dependencies:** Use the spring-test bundle
 5. **Preserve business logic:** Only change framework-related code, not business logic
 6. **Update all workflows:** Ensure CI/CD uses Java 25
 7. **Fix compilation errors:** Address all API changes systematically
 8. **Maintain configuration values:** Keep existing URLs, credentials, feature flags
+9. **Comment out spring-boot-starter-aop:** It's pulled transitively in Spring Boot 4
+10. **Use setter methods for Kafka:** Property assignment may not work in Spring Boot 4
 
 ## Execution Steps (in order)
 
@@ -878,3 +970,18 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 
 ### Issue: Flyway migrations fail
 **Solution:** Check Flyway version compatibility and configuration in Spring Boot 4
+
+### Issue: "Unresolved reference 'annotation'" errors
+**Solution:** Jackson 3.0 keeps annotations in `com.fasterxml.jackson.annotation.*` - do NOT change these imports to `tools.jackson`
+
+### Issue: "val cannot be reassigned" in Kafka configuration
+**Solution:** Use explicit setter methods (`.setConsumerFactory()`) instead of Kotlin property assignment
+
+### Issue: RestTemplateBuilder not found
+**Solution:** This is a known Spring Boot 4.0.2 issue. Consider migrating to the new `RestClient` API or wait for Spring Boot 4.0.3+
+
+### Issue: Type mismatch for maxAttempts (Int vs Long)
+**Solution:** Change `Int.MAX_VALUE` to `Long.MAX_VALUE` or use `.toLong()` conversion
+
+### Issue: serializationInclusion method not found
+**Solution:** Use `JsonInclude.Value.construct(JsonInclude.Include.NON_NULL, JsonInclude.Include.NON_NULL)` instead of just `JsonInclude.Include.NON_NULL`

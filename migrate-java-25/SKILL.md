@@ -103,19 +103,14 @@ Change the version:
 
 ### 4. Update GitHub Workflows (`.github/workflows/`)
 
-Update all workflow files that specify `jdk-version`:
+**Files to update:**
+- `.github/workflows/ci.yaml`
+- `.github/workflows/cd.yaml`
+- `.github/workflows/background-maintenance.yaml`
+- `.github/workflows/manual-deployment.yaml`
+- `.github/workflows/codeql.yml`
 
-**ci.yaml:**
-```yaml
-jdk-version: '25'
-```
-
-**cd.yaml:**
-```yaml
-jdk-version: '25'
-```
-
-**manual-deployment.yaml:**
+**Add parameter in each workflow's `with:` section:**
 ```yaml
 jdk-version: '25'
 ```

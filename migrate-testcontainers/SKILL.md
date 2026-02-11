@@ -216,6 +216,7 @@ import org.junit.jupiter.api.Assertions.*
 - `.github/workflows/cd.yaml`
 - `.github/workflows/background-maintenance.yaml`
 - `.github/workflows/manual-deployment.yaml`
+- `.github/workflows/codeql.yml`
 
 **Add parameter in each workflow's `with:` section:**
 ```yaml
